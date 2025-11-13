@@ -658,6 +658,17 @@ char* codegen_generate_c_code(AST_T* root) {
     codegen_write(codegen, "    printf(\"]\\n\");\n");
     codegen_write(codegen, "}\n\n");
     
+    // Write number to string conversion helper function
+    codegen_write(codegen, "char* number_to_string(double num) {\n");
+    codegen_write(codegen, "    char* result = malloc(32);\n");
+    codegen_write(codegen, "    if (num == (int)num) {\n");
+    codegen_write(codegen, "        sprintf(result, \"%d\", (int)num);\n");
+    codegen_write(codegen, "    } else {\n");
+    codegen_write(codegen, "        sprintf(result, \"%.2f\", num);\n");
+    codegen_write(codegen, "    }\n");
+    codegen_write(codegen, "    return result;\n");
+    codegen_write(codegen, "}\n\n");
+    
     // Write string concatenation helper function
     codegen_write(codegen, "char* string_concat(const char* str1, const char* str2) {\n");
     codegen_write(codegen, "    size_t len1 = strlen(str1);\n");
@@ -665,6 +676,14 @@ char* codegen_generate_c_code(AST_T* root) {
     codegen_write(codegen, "    char* result = malloc(len1 + len2 + 1);\n");
     codegen_write(codegen, "    strcpy(result, str1);\n");
     codegen_write(codegen, "    strcat(result, str2);\n");
+    codegen_write(codegen, "    return result;\n");
+    codegen_write(codegen, "}\n\n");
+    
+    // Write mixed string concatenation helper function
+    codegen_write(codegen, "char* string_concat_mixed(const char* str, double num) {\n");
+    codegen_write(codegen, "    char* num_str = number_to_string(num);\n");
+    codegen_write(codegen, "    char* result = string_concat(str, num_str);\n");
+    codegen_write(codegen, "    free(num_str);\n");
     codegen_write(codegen, "    return result;\n");
     codegen_write(codegen, "}\n\n");
     
@@ -855,28 +874,78 @@ void codegen_write_boolean(codegen_T* codegen, AST_T* node) {
 void codegen_write_binary_op(codegen_T* codegen, AST_T* node) {
     // Special handling for string concatenation with + operator
     if (node->binary_op_type == TOKEN_PLUS) {
-        // Check if either operand is a string literal or string variable
-        int is_string_op = 0;
+        // Simple approach: only handle string literals for now
+        int left_is_string_literal = (node->binary_op_left->type == AST_STRING);
+        int right_is_string_literal = (node->binary_op_right->type == AST_STRING);
         
-        // Check if left operand is string literal
-        if (node->binary_op_left->type == AST_STRING) {
-            is_string_op = 1;
-        }
-        // Check if right operand is string literal
-        else if (node->binary_op_right->type == AST_STRING) {
-            is_string_op = 1;
-        }
-        // Only treat as string operation if we have explicit string literals
-        // Variables should use numeric operations by default
-        
-        if (is_string_op) {
-            // Use string concatenation function
+        if (left_is_string_literal && right_is_string_literal) {
+            // Both are string literals - use string_concat
             codegen_write(codegen, "string_concat(");
             codegen_write_ast(codegen, node->binary_op_left);
             codegen_write(codegen, ", ");
             codegen_write_ast(codegen, node->binary_op_right);
             codegen_write(codegen, ")");
             return;
+        } else if (left_is_string_literal && !right_is_string_literal) {
+            // String literal + something else
+            if (node->binary_op_right->type == AST_FUNCTION_CALL) {
+                // Check if function returns string or number
+                char* func_name = node->binary_op_right->function_call_name;
+                if (strstr(func_name, "string_") == func_name && 
+                    (strcmp(func_name, "string_contains") != 0 && 
+                     strcmp(func_name, "string_starts_with") != 0)) {
+                    // String function (except contains/starts_with which return int) - use string_concat
+                    codegen_write(codegen, "string_concat(");
+                    codegen_write_ast(codegen, node->binary_op_left);
+                    codegen_write(codegen, ", ");
+                    codegen_write_ast(codegen, node->binary_op_right);
+                    codegen_write(codegen, ")");
+                    return;
+                } else {
+                    // Math function or boolean function - use string_concat_mixed
+                    codegen_write(codegen, "string_concat_mixed(");
+                    codegen_write_ast(codegen, node->binary_op_left);
+                    codegen_write(codegen, ", ");
+                    codegen_write_ast(codegen, node->binary_op_right);
+                    codegen_write(codegen, ")");
+                    return;
+                }
+            } else if (node->binary_op_right->type == AST_VARIABLE) {
+                // Variable - assume it could be string, use string_concat
+                codegen_write(codegen, "string_concat(");
+                codegen_write_ast(codegen, node->binary_op_left);
+                codegen_write(codegen, ", ");
+                codegen_write_ast(codegen, node->binary_op_right);
+                codegen_write(codegen, ")");
+                return;
+            } else {
+                // Number literal - use string_concat_mixed
+                codegen_write(codegen, "string_concat_mixed(");
+                codegen_write_ast(codegen, node->binary_op_left);
+                codegen_write(codegen, ", ");
+                codegen_write_ast(codegen, node->binary_op_right);
+                codegen_write(codegen, ")");
+                return;
+            }
+        } else if (!left_is_string_literal && right_is_string_literal) {
+            // Something else + string literal
+            if (node->binary_op_left->type == AST_VARIABLE) {
+                // Variable + string literal - assume variable could be string, use string_concat
+                codegen_write(codegen, "string_concat(");
+                codegen_write_ast(codegen, node->binary_op_left);
+                codegen_write(codegen, ", ");
+                codegen_write_ast(codegen, node->binary_op_right);
+                codegen_write(codegen, ")");
+                return;
+            } else {
+                // Number + string literal - convert number first
+                codegen_write(codegen, "string_concat(number_to_string(");
+                codegen_write_ast(codegen, node->binary_op_left);
+                codegen_write(codegen, "), ");
+                codegen_write_ast(codegen, node->binary_op_right);
+                codegen_write(codegen, ")");
+                return;
+            }
         }
     }
     
