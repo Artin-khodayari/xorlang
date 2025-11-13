@@ -96,19 +96,18 @@ void codegen_write_variable_definition(codegen_T* codegen, AST_T* node) {
             codegen_write(codegen, "int ");
             break;
         case AST_BINARY_OP:
-            // Check if this is string concatenation
+            // Check if this is string concatenation (only if explicit string literals)
             if (node->variable_definition_value->binary_op_type == TOKEN_PLUS) {
-                // Check if any operand is a string literal or variable (assume string concatenation)
+                // Only treat as string concatenation if we have explicit string literals
                 if (node->variable_definition_value->binary_op_left->type == AST_STRING ||
-                    node->variable_definition_value->binary_op_right->type == AST_STRING ||
-                    node->variable_definition_value->binary_op_left->type == AST_VARIABLE ||
-                    node->variable_definition_value->binary_op_right->type == AST_VARIABLE) {
+                    node->variable_definition_value->binary_op_right->type == AST_STRING) {
                     codegen_write(codegen, "char* ");
                 } else {
+                    // For numeric operations (including with variables), assume int
                     codegen_write(codegen, "int ");
                 }
             } else {
-                // For numeric binary operations, assume int
+                // For other binary operations, assume int
                 codegen_write(codegen, "int ");
             }
             break;
@@ -867,12 +866,8 @@ void codegen_write_binary_op(codegen_T* codegen, AST_T* node) {
         else if (node->binary_op_right->type == AST_STRING) {
             is_string_op = 1;
         }
-        // For now, assume any + operation with variables might be string concatenation
-        // This is a simple heuristic - could be improved with proper type tracking
-        else if (node->binary_op_left->type == AST_VARIABLE || 
-                 node->binary_op_right->type == AST_VARIABLE) {
-            is_string_op = 1;
-        }
+        // Only treat as string operation if we have explicit string literals
+        // Variables should use numeric operations by default
         
         if (is_string_op) {
             // Use string concatenation function
