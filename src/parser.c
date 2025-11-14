@@ -96,6 +96,24 @@ AST_T* parser_parse_statement(parser_T* parser) {
             // Import statement
             return parser_parse_import(parser);
         }
+        case TOKEN_NOTE: {
+            // Comment handling - skip the note token and everything until end of line
+            parser_eat(parser, TOKEN_NOTE);
+            parser_eat(parser, TOKEN_COLON);
+            
+            // Skip all tokens until we find a semicolon or reach end of statement
+            while (parser->current_token != NULL && 
+                   parser->current_token->type != TOKEN_SEMI &&
+                   parser->current_token->type != TOKEN_RBRACE &&
+                   parser->current_token->type != TOKEN_BUCKET &&
+                   parser->current_token->type != TOKEN_SHOW &&
+                   parser->current_token->type != TOKEN_NOTE) {
+                parser->current_token = lexer_get_next_token(parser->lerxer);
+            }
+            
+            // Return null to indicate this statement should be ignored
+            return NULL;
+        }
         case TOKEN_ID: {
             // Check for multi-word keywords
             if (strcmp(parser->current_token->value, "when") == 0) {
@@ -171,18 +189,28 @@ AST_T* parser_parse_statements(parser_T* parser) {
     compound->compound_value[0] = ast_statement;
     compound->compound_size += 1;
     
-    while (parser->current_token != NULL && parser->current_token->type != TOKEN_RBRACE) {
+    int statement_count = 0;
+    int max_statements = 1000; // Allow up to 1000 statements
+    
+    while (parser->current_token != NULL && parser->current_token->type != TOKEN_RBRACE && statement_count < max_statements) {
         // Save current token to detect infinite loops
         token_T* prev_token = parser->current_token;
+        char* prev_token_value = prev_token ? prev_token->value : NULL;
         
         AST_T* ast_statement = parser_parse_statement(parser);
         
-        // Safety check: if token didn't advance, break to prevent infinite loop
-        if (parser->current_token == prev_token) {
-            printf("Parser error: Token not consumed, breaking to prevent infinite loop\n");
-            break;
+        // Safety check: if token didn't advance AND we got a null statement, try to advance manually
+        if (parser->current_token == prev_token && ast_statement == NULL) {
+            // Try to advance to next meaningful token
+            parser->current_token = lexer_get_next_token(parser->lerxer);
+            if (parser->current_token == prev_token) {
+                // Still stuck, break to prevent infinite loop
+                printf("Parser warning: Skipping unrecognized token and continuing\n");
+                break;
+            }
         }
         
+        // Only add non-null statements (this allows comments to be skipped)
         if (ast_statement) {
             compound->compound_size += 1;
             compound->compound_value = realloc(
@@ -191,6 +219,8 @@ AST_T* parser_parse_statements(parser_T* parser) {
             );
             compound->compound_value[compound->compound_size-1] = ast_statement;
         }
+        
+        statement_count++;
     }
     
     return compound;
@@ -306,41 +336,54 @@ AST_T* parser_parse_factor(parser_T* parser) {
             // Built-in functions are always function calls
             return parser_parse_function_call(parser);
         case TOKEN_ID: {
-            // Safe approach: save current state and peek next token
-            char* identifier_value = calloc(strlen(parser->current_token->value) + 1, sizeof(char));
-            strcpy(identifier_value, parser->current_token->value);
+            // Look ahead to determine if this is a function call or variable
+            lexer_T* temp_lexer = parser->lerxer;
+            unsigned int saved_pos = temp_lexer->i;
+            char saved_char = temp_lexer->c;
             
-            // Save lexer state
-            size_t saved_pos = parser->lerxer->i;
-            char saved_char = parser->lerxer->c;
+            // Skip current identifier
+            while (temp_lexer->c != '\0' && (isalnum(temp_lexer->c) || temp_lexer->c == '_')) {
+                lexer_advance(temp_lexer);
+            }
+            lexer_skip_whitespace(temp_lexer);
             
-            // Consume current token to peek next
-            parser_eat(parser, parser->current_token->type);
-            
-            if (parser->current_token->type == TOKEN_LPAREN) {
-                // It's a function call - restore lexer and parse as function call
-                parser->lerxer->i = saved_pos;
-                parser->lerxer->c = saved_char;
-                parser->current_token = lexer_get_next_token(parser->lerxer);
-                free(identifier_value);
+            if (temp_lexer->c == '(') {
+                // It's a function call - restore lexer state and parse as function call
+                temp_lexer->i = saved_pos;
+                temp_lexer->c = saved_char;
                 return parser_parse_function_call(parser);
-            } else if (parser->current_token->type == TOKEN_LBRACKET) {
-                // It's array access - parse directly without restoring lexer
-                // Current token is already '[', so parse index expression
-                parser_eat(parser, TOKEN_LBRACKET);
-                AST_T* index_expr = parser_parse_expr(parser);
-                parser_eat(parser, TOKEN_RBRACKET);
+            } else if (temp_lexer->c == '[') {
+                // It's array access - restore lexer state and parse normally
+                temp_lexer->i = saved_pos;
+                temp_lexer->c = saved_char;
                 
-                // Create array access AST
-                AST_T* array_access = init_ast(AST_ARRAY_ACCESS);
-                array_access->array_access_name = identifier_value;  // Use the saved identifier
-                array_access->array_access_index = index_expr;
-                return array_access;
+                char* identifier_value = calloc(strlen(parser->current_token->value) + 1, sizeof(char));
+                strcpy(identifier_value, parser->current_token->value);
+                parser_eat(parser, TOKEN_ID);
+                
+                if (parser->current_token->type == TOKEN_LBRACKET) {
+                    // It's array access - parse directly without restoring lexer
+                    // Current token is already '[', so parse index expression
+                    parser_eat(parser, TOKEN_LBRACKET);
+                    AST_T* index_expr = parser_parse_expr(parser);
+                    parser_eat(parser, TOKEN_RBRACKET);
+                    
+                    // Create array access AST
+                    AST_T* array_access = init_ast(AST_ARRAY_ACCESS);
+                    array_access->array_access_name = identifier_value;  // Use the saved identifier
+                    array_access->array_access_index = index_expr;
+                    return array_access;
+                } else {
+                    // It's a variable - create variable AST with saved identifier
+                    AST_T* ast_variable = init_ast(AST_VARIABLE);
+                    ast_variable->variable_name = identifier_value;
+                    return ast_variable;
+                }
             } else {
-                // It's a variable - create variable AST with saved identifier
-                AST_T* ast_variable = init_ast(AST_VARIABLE);
-                ast_variable->variable_name = identifier_value;
-                return ast_variable;
+                // It's a variable - restore lexer state and parse as variable
+                temp_lexer->i = saved_pos;
+                temp_lexer->c = saved_char;
+                return parser_parse_variable(parser);
             }
         }
     }
